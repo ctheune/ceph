@@ -10944,13 +10944,14 @@ void ReplicatedPG::agent_clear()
   agent_state.reset(NULL);
 }
 
-void ReplicatedPG::agent_work(int start_max)
+// Return false if no objects operated on since start of object hash space
+bool ReplicatedPG::agent_work(int start_max)
 {
   lock();
   if (!agent_state) {
     dout(10) << __func__ << " no agent state, stopping" << dendl;
     unlock();
-    return;
+    return true;
   }
 
   assert(!deleting);
@@ -10958,7 +10959,7 @@ void ReplicatedPG::agent_work(int start_max)
   if (agent_state->is_idle()) {
     dout(10) << __func__ << " idle, stopping" << dendl;
     unlock();
-    return;
+    return true;
   }
 
   osd->logger->inc(l_osd_agent_wake);
@@ -11059,13 +11060,28 @@ void ReplicatedPG::agent_work(int start_max)
     agent_state->temp_hist.decay();
   }
 
-  if (next.is_max())
+  // Total objects operated on so far
+  int total_started = agent_state->started + started;
+  // See if we are starting from beginning
+  if (next.is_max()) {
     agent_state->position = hobject_t();
-  else
+    agent_state->started = 0;
+  } else {
     agent_state->position = next;
-  dout(20) << __func__ << " final position " << agent_state->position << dendl;
+    agent_state->started = total_started;
+  }
+  dout(20) << __func__ << " final position " << agent_state->position
+    << " started " << total_started << dendl;
+  if (next.is_max() && total_started == 0) {
+    assert(agent_state->delaying == false);
+    agent_state->delaying = true;
+    agent_stop();
+    unlock();
+    return false;
+  }
   agent_choose_mode();
   unlock();
+  return true;
 }
 
 void ReplicatedPG::agent_load_hit_sets()
@@ -11276,8 +11292,25 @@ void ReplicatedPG::agent_stop()
   }
 }
 
-void ReplicatedPG::agent_choose_mode()
+void ReplicatedPG::agent_choose_mode_restart()
 {
+  dout(20) << __func__ << dendl;
+  lock();
+  if (agent_state && agent_state->is_idle()) {
+    agent_choose_mode(true);
+  }
+  unlock();
+}
+
+void ReplicatedPG::agent_choose_mode(bool restart)
+{
+  // Let delay play out
+  if (!restart && agent_state->delaying) {
+    dout(20) << __func__ << this << " delaying, ignored" << dendl;
+    return;
+  }
+  agent_state->delaying = false;
+
   uint64_t divisor = pool.info.get_pg_num_divisor(info.pgid.pgid);
   assert(divisor > 0);
 
@@ -11354,7 +11387,7 @@ void ReplicatedPG::agent_choose_mode()
   TierAgentState::flush_mode_t flush_mode = TierAgentState::FLUSH_MODE_IDLE;
   uint64_t flush_target = pool.info.cache_target_dirty_ratio_micro;
   uint64_t flush_slop = (float)flush_target * g_conf->osd_agent_slop;
-  if (agent_state->flush_mode == TierAgentState::FLUSH_MODE_IDLE)
+  if (!restart && agent_state->flush_mode == TierAgentState::FLUSH_MODE_IDLE)
     flush_target += flush_slop;
   else
     flush_target -= MIN(flush_target, flush_slop);
@@ -11371,7 +11404,7 @@ void ReplicatedPG::agent_choose_mode()
   unsigned evict_effort = 0;
   uint64_t evict_target = pool.info.cache_target_full_ratio_micro;
   uint64_t evict_slop = (float)evict_target * g_conf->osd_agent_slop;
-  if (agent_state->evict_mode == TierAgentState::EVICT_MODE_IDLE)
+  if (!restart && agent_state->evict_mode == TierAgentState::EVICT_MODE_IDLE)
     evict_target += evict_slop;
   else
     evict_target -= MIN(evict_target, evict_slop);

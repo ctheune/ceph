@@ -466,6 +466,8 @@ public:
     }
   } agent_thread;
   bool agent_stop_flag;
+  Mutex agent_timer_lock;
+  SafeTimer agent_timer;
 
   void agent_entry();
   void agent_stop();

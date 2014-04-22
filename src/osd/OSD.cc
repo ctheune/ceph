@@ -201,6 +201,8 @@ OSDService::OSDService(OSD *osd) :
   agent_active(true),
   agent_thread(this),
   agent_stop_flag(false),
+  agent_timer_lock("OSD::agent_timer_lock"),
+  agent_timer(osd->client_messenger->cct, agent_timer_lock),
   objecter_lock("OSD::objecter_lock"),
   objecter_timer(osd->client_messenger->cct, objecter_lock),
   objecter(new Objecter(osd->client_messenger->cct, osd->objecter_messenger, osd->monc, &objecter_osdmap,
@@ -435,6 +437,10 @@ void OSDService::shutdown()
     Mutex::Locker l(backfill_request_lock);
     backfill_request_timer.shutdown();
   }
+  {
+    Mutex::Locker l(agent_timer_lock);
+    agent_timer.shutdown();
+  }
   osdmap = OSDMapRef();
   next_osdmap = OSDMapRef();
 }
@@ -451,6 +457,7 @@ void OSDService::init()
     objecter->init_locked();
   }
   watch_timer.init();
+  agent_timer.init();
 
   agent_thread.create();
 }
@@ -465,6 +472,15 @@ void OSDService::activate_map()
   agent_cond.Signal();
   agent_lock.Unlock();
 }
+
+class AgentTimeoutCB : public Context {
+  PGRef pg;
+public:
+  AgentTimeoutCB(PGRef _pg) : pg(_pg) {}
+  void finish(int) {
+    pg->agent_choose_mode_restart();
+  }
+};
 
 void OSDService::agent_entry()
 {
@@ -501,7 +517,17 @@ void OSDService::agent_entry()
     PGRef pg = *agent_queue_pos;
     int max = g_conf->osd_agent_max_ops - agent_ops;
     agent_lock.Unlock();
-    pg->agent_work(max);
+    if(!pg->agent_work(max)) {
+      dout(10) << __func__ << " " << *pg
+	<< " no agent_work, delay for " << g_conf->osd_agent_delay_time
+	<< " seconds" << dendl;
+
+      // Queue a timer to call agent_choose_mode for this pg in 5 seconds
+      agent_timer_lock.Lock();
+      Context *cb = new AgentTimeoutCB(pg);
+      agent_timer.add_event_after(g_conf->osd_agent_delay_time, cb);
+      agent_timer_lock.Unlock();
+    }
     agent_lock.Lock();
   }
   agent_lock.Unlock();
