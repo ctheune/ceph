@@ -11279,6 +11279,7 @@ void ReplicatedPG::agent_stop()
 void ReplicatedPG::agent_choose_mode()
 {
   uint64_t divisor = pool.info.get_pg_num_divisor(info.pgid.pgid);
+  assert(divisor > 0);
 
   uint64_t num_user_objects = info.stats.stats.sum.num_objects;
 
@@ -11323,6 +11324,7 @@ void ReplicatedPG::agent_choose_mode()
   uint64_t dirty_micro = 0;
   uint64_t full_micro = 0;
   if (pool.info.target_max_bytes && info.stats.stats.sum.num_objects) {
+    assert((pool.info.target_max_bytes / divisor) > 0);
     uint64_t avg_size = info.stats.stats.sum.num_bytes /
       info.stats.stats.sum.num_objects;
     dirty_micro =
@@ -11333,6 +11335,7 @@ void ReplicatedPG::agent_choose_mode()
       (pool.info.target_max_bytes / divisor);
   }
   if (pool.info.target_max_objects) {
+    assert((pool.info.target_max_objects / divisor) > 0);
     uint64_t dirty_objects_micro =
       num_dirty * 1000000 /
       (pool.info.target_max_objects / divisor);
@@ -11384,6 +11387,7 @@ void ReplicatedPG::agent_choose_mode()
     evict_mode = TierAgentState::EVICT_MODE_SOME;
     uint64_t over = full_micro - evict_target;
     uint64_t span = 1000000 - evict_target;
+    assert(span > 0);
     evict_effort = MAX(over * 1000000 / span,
 		       (unsigned)(1000000.0 * g_conf->osd_agent_min_evict_effort));
 
